@@ -6,7 +6,7 @@ The useful question is not “How do we make GPT sound more confident?” It is 
 
 Junchi Liao's [*Writing for the Reviewer: Defensive Writing in GPT Models*](https://arxiv.org/abs/2610.11355v1) compares rewriting and evidence-based writing across GPT and other model families. Its rewriting study uses 77 English computer-science paragraphs.
 
-In the controlled prompt comparison, GPT-6 Astra softens 9% of tracked claims under a polishing request and 33% under a request to address likely reviewer concerns. Retraction rises from 0.2% to 9.5%. Repeated review and revision also produces more defensive text.
+In the controlled prompt comparison, GPT-6 Astra softens 9% of tracked claims under a polishing request and 33% under a request to address likely reviewer concerns. Retraction rises from 0.2% to 9.5%. Repeated review and revision also produce more defensive text.
 
 The reader experiment reveals an especially useful mismatch: AI reviewers give the reviewer-oriented Astra rewrites higher overall scores, while four human readers rate them harder to read. The overall AI score rises by 1.22 points on a ten-point scale; ease of reading falls by 0.70 points on a seven-point scale. Comprehension questions receive equally correct answers in both conditions.
 
