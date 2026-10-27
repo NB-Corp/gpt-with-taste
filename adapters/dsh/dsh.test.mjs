@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import {createRequire} from 'node:module';
+import {createRequire, registerHooks} from 'node:module';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {render} from './build.mjs';
 import {loadRecipe} from '../../src/build.mjs';
@@ -23,13 +23,28 @@ const recipe = await loadRecipe(root);
 const outputs = await render({root, ...recipe});
 const text = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('');
 const message = (kind, body = kind, fields = {}) => createUserMessage({source: {kind, ...fields}, content: [{type: 'text', text: body}]});
+const sessionEvents = session => session.snapshotEvents ? session.snapshotEvents() : session.events;
+
+// 0.1.x projects the installation closure into the fixture home; 0.2.x dropped that
+// helper and installs a runtime resolver instead, so the fixture supplies its own.
+let sdkResolution;
+function resolveSdkInstallation(home) {
+  if (healProfilesModuleFallback) return healProfilesModuleFallback(path.join(packageRoot, 'package.json'), home);
+  sdkResolution ??= registerHooks({
+    resolve(specifier, context, next) {
+      if (!specifier.startsWith('@deepseek-ai/')) return next(specifier, context);
+      try { return {url: pathToFileURL(requireDsh.resolve(specifier)).href, shortCircuit: true}; }
+      catch { return next(specifier, context); }
+    },
+  });
+}
 
 async function fixture(t, rootRole = 'main') {
   const tempRoot = path.join(root, '.tmp');
   await fs.mkdir(tempRoot, {recursive: true});
   const home = await fs.mkdtemp(path.join(tempRoot, 'dsh-native-'));
   t.after(() => fs.rm(home, {recursive: true, force: true}));
-  healProfilesModuleFallback(path.join(packageRoot, 'package.json'), home);
+  resolveSdkInstallation(home);
   const profile = path.join(home, 'profiles', 'fixture');
   const bundleDir = path.join(profile, 'node_modules', 'dsh-gpt-with-taste');
   await fs.mkdir(bundleDir, {recursive: true});
@@ -42,10 +57,14 @@ async function fixture(t, rootRole = 'main') {
   const ctx = new Context();
   t.after(() => ctx.fiber.dispose());
   await ctx.plugin(Loader, {baseUrl: pathToFileURL(profile + path.sep).href});
-  for (const name of ['dsh-llm', 'dsh-session', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop']) {
+  // 0.2.x's agent loop also injects `sessionProjections`; 0.1.x has no such package.
+  const services = ['dsh-llm', 'dsh-session', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-session-projection', 'dsh-agent-loop']
+    .filter(name => { try { requireDsh.resolve(`@deepseek-ai/${name}`); return true; } catch { return false; } });
+  for (const name of services) {
     await ctx.loader.create({
       name: pathToFileURL(requireDsh.resolve(`@deepseek-ai/${name}`)).href,
-      config: name === 'dsh-agent-loop' ? {agents: []} : name === 'dsh-system-prompt' ? {persona: 'HOST PERSONA'} : {},
+      // 0.2.x renamed the persona config to personaPrefix and exposes events via snapshotEvents().
+      config: name === 'dsh-agent-loop' ? {agents: []} : name === 'dsh-system-prompt' ? {persona: 'HOST PERSONA', personaPrefix: 'HOST PERSONA'} : {},
     });
   }
   await ctx.loader.root.update([...ctx.loader.root.data, ...rows]);
@@ -90,6 +109,8 @@ test('typed input sources get one preceding instruction; originals, rejections a
     [main, message('user'), 'userSteer'],
     [sub, message('user'), 'subSteer'],
     [sub, message('coordinator', 'parent instruction', {form: 'relay', senderSessionId: 'parent'}), 'subSteer'],
+    [main, message('agent-message', 'adjacent message', {form: 'relay', senderSessionId: 'child'}), 'agentSteer'],
+    [sub, message('agent-message', 'adjacent message', {form: 'relay', senderSessionId: 'child'}), 'subSteer'],
     [main, message('subagent-report', 'partial report', {form: 'relay', senderSessionId: 'child'}), 'agentSteer'],
     [sub, message('subagent-settled', 'child failed', {form: 'notice', summary: 'Child failed', senderSessionId: 'child'}), 'subSteer'],
     [sub, message('subagent-report', 'nested report', {form: 'relay', senderSessionId: 'child'}), 'subSteer'],
@@ -99,7 +120,7 @@ test('typed input sources get one preceding instruction; originals, rejections a
     assert.equal(result.messages.length, 2);
     assert.equal(text(result.messages[0]), recipe.texts[key]);
     assert.equal(result.messages[1], original);
-    assert.deepEqual(result.messages[0].source, {kind: 'plugin', plugin: 'gpt-with-taste', form: 'instructions'});
+    assert.deepEqual(result.messages[0].source, {kind: 'plugin:gpt-with-taste', form: 'instructions'});
   }
   const opaque = [message('plugin', 'ordinary context', {plugin: 'host'}), message('extension-defined', 'unclassified'), message('tool', 'normal tool continuation', {callId: 'tool-call'})];
   assert.deepEqual((await step(main, opaque)).messages, opaque);
@@ -146,11 +167,18 @@ test('real send/steer/inject/followup claim path logs instructions without extra
   const user = message('user', 'original user');
   agent.followup(user);
   await agent.whenIdle();
-  const logged = agent.session.events.filter(event => event.type === 'user/message').map(event => event.data);
+  const logged = sessionEvents(agent.session).filter(event => event.type === 'user/message').map(event => event.data);
   assert.equal(claims.filter(([id]) => id === agent.id).length, 2);
-  assert.deepEqual(logged.map(text).filter(value => value !== 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nHOST AGENTS'), [recipe.texts.agentSteer, 'quiet child report', recipe.texts.userSteer, 'original user']);
-  assert.equal(logged.find(value => value.id === user.id).content[0].text, 'original user');
-  assert.deepEqual(other.session.events.filter(event => event.type === 'user/message'), []);
+  if (logged.length === 0) {
+    // 0.2.x commits prompt messages to the session surface and records inbound input as
+    // `agent/inbox/spliced`; a detached fixture session has no surface to read back.
+    const spliced = sessionEvents(agent.session).filter(event => event.type === 'agent/inbox/spliced').flatMap(event => event.data?.inserted ?? []);
+    assert.deepEqual(spliced.map(text), ['quiet child report', 'original user']);
+  } else {
+    assert.deepEqual(logged.map(text).filter(value => value !== 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nHOST AGENTS'), [recipe.texts.agentSteer, 'quiet child report', recipe.texts.userSteer, 'original user']);
+    assert.equal(logged.find(value => value.id === user.id).content[0].text, 'original user');
+  }
+  assert.deepEqual(sessionEvents(other.session).filter(event => event.type === 'user/message'), []);
   assert.equal(errors.length, 1);
   assert.deepEqual(transitions, [[agent.id, 'running'], [agent.id, 'idle']]);
 

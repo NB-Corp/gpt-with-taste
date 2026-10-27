@@ -4,6 +4,8 @@ import {createUserMessage} from '@deepseek-ai/dsh-llm';
 export const name = 'gpt-with-taste';
 export const inject = ['systemPrompt', 'agents'];
 const sectionName = 'gpt-with-taste:behavior';
+// Session format v4 rejects the retired `plugin` wrapper; steer messages carry a producer kind.
+const sourceKind = `plugin:${name}`;
 
 /** Native DSH augmentation. All behavior text comes from the compiler output. */
 export async function apply(ctx, config = {}) {
@@ -34,6 +36,9 @@ export async function apply(ctx, config = {}) {
           case 'coordinator':
             key = role === 'sub' ? 'subSteer' : undefined;
             break;
+          case 'agent-message':
+            key = role === 'sub' ? 'subSteer' : role === 'main' ? 'agentSteer' : undefined;
+            break;
           case 'subagent-report':
           case 'subagent-settled':
             key = role === 'sub' ? 'subSteer' : role === 'main' ? 'agentSteer' : undefined;
@@ -44,7 +49,7 @@ export async function apply(ctx, config = {}) {
         }
         if (key === undefined) return [message];
         return [createUserMessage({
-          source: {kind: 'plugin', plugin: name, form: 'instructions'},
+          source: {kind: sourceKind, form: 'instructions'},
           content: [{type: 'text', text: texts[key]}],
         }), message];
       }),
