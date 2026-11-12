@@ -319,7 +319,7 @@ test('actual generated callbacks and simulated provider payloads keep author met
     const input = [{source: {kind: 'user'}, content: [{type: 'text', text: 'Continue'}]},
       {source: {kind: 'subagent-report'}, content: [{type: 'text', text: 'Result'}]}];
     const output = await callback({agent}, async () => ({kind: 'enter', messages: input}));
-    const added = output.messages.filter(message => message.source.kind === 'plugin');
+    const added = output.messages.filter(message => message.source.kind === 'plugin:gpt-with-taste');
     const expected = role === 'independent' ? [] : role === 'sub' ? [texts.subSteer, texts.subSteer] : [texts.userSteer, texts.agentSteer];
     assert.deepEqual(added.map(message => message.content[0].text), expected);
     assertCleanContext({system: section.text({agent}), messages: output.messages});

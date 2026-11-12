@@ -20,7 +20,7 @@ export async function render({root, meta, texts}) {
       exports: {'.': './index.mjs', './cordis.patch.yml': './cordis.patch.yml'},
       files: ['index.mjs', 'texts.json', 'cordis.patch.yml', 'LICENSE'],
       engines: {node: '^22.19.0 || >=24.0.0'},
-      peerDependencies: {'@deepseek-ai/dsh-llm': '>=0.1.0-rc.6 <0.2.0'},
+      peerDependencies: {'@deepseek-ai/dsh-llm': '>=0.1.0-rc.6 <0.3.0'},
       dsh: {bundle: {patch: './cordis.patch.yml'}},
     })],
     ['cordis.patch.yml', `${generated}- insert:\n    - id: gpt-with-taste\n      name: dsh-gpt-with-taste\n      config:\n        rootRole: main\n`],

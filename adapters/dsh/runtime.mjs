@@ -44,7 +44,8 @@ export async function apply(ctx, config = {}) {
         }
         if (key === undefined) return [message];
         return [createUserMessage({
-          source: {kind: 'plugin', plugin: name, form: 'instructions'},
+          // DSH 0.2's V4 admission refuses the retired `plugin` source kind; use the producer-owned kind.
+          source: {kind: `plugin:${name}`, form: 'instructions'},
           content: [{type: 'text', text: texts[key]}],
         }), message];
       }),
