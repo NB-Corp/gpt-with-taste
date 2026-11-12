@@ -19,6 +19,19 @@ jobs:
       - run: npm test
 
   dsh-consumer:
+    name: dsh-consumer (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: rc.6
+            target: .tmp/dsh-sdk
+            manifest: adapters/dsh/consumer
+            artifact: dsh-consumer-npm-logs
+          - label: 0.2
+            target: .tmp/dsh-sdk-0-2
+            manifest: adapters/dsh/consumer-0.2
+            artifact: dsh-consumer-0-2-npm-logs
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -34,16 +47,16 @@ jobs:
           npm_config_fetch_retries: '1'
           npm_config_fetch_timeout: '20000'
         run: |
-          mkdir -p .tmp/dsh-sdk
-          cp adapters/dsh/consumer/package{,-lock}.json .tmp/dsh-sdk/
-          npm ci --prefix .tmp/dsh-sdk --ignore-scripts --no-audit --no-fund --timing --loglevel=http
+          mkdir -p ${{ matrix.target }}
+          cp ${{ matrix.manifest }}/package{,-lock}.json ${{ matrix.target }}/
+          npm ci --prefix ${{ matrix.target }} --ignore-scripts --no-audit --no-fund --timing --loglevel=http
       - run: npm run test:dsh
         env:
-          DSH_PACKAGE_ROOT: ${{ github.workspace }}/.tmp/dsh-sdk
+          DSH_PACKAGE_ROOT: ${{ github.workspace }}/${{ matrix.target }}
       - name: Upload npm diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-consumer-npm-logs
+          name: ${{ matrix.artifact }}
           path: .tmp/dsh-npm-cache/_logs/
           if-no-files-found: ignore

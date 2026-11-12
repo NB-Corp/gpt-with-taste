@@ -12,24 +12,68 @@ const packageRoot = process.env.DSH_PACKAGE_ROOT;
 if (!packageRoot) throw new Error('Set DSH_PACKAGE_ROOT to an installed @deepseek-ai/dsh directory (see docs/harnesses/dsh.md)');
 const requireDsh = createRequire(path.join(packageRoot, 'package.json'));
 const sdk = async name => import(pathToFileURL(requireDsh.resolve(`@deepseek-ai/${name}`)).href);
+const v4Admission = await sdk('dsh-session-format-v3-to-v4').catch(() => undefined);
+const assertV4RowAdmission = v4Admission?.assertV4RowAdmission;
 const {Context} = await sdk('cordis');
 const {default: Loader} = await sdk('cordis-plugin-loader');
-const {loadProfile, composeEntries, healProfilesModuleFallback} = await sdk('dsh-app-boot');
+const {loadProfile, composeEntries, getDshRuntimeVersion} = await sdk('dsh-app-boot');
 const {createUserMessage} = await sdk('dsh-llm');
 const {SessionId} = await sdk('dsh-session');
 const {agentEvents, assembleContextFor} = await sdk('dsh-agent');
 const {renderPrompt} = await sdk('dsh-system-prompt');
+const runtimeVersion = getDshRuntimeVersion?.() ?? '0.1.0-rc.6';
+const [runtimeMajor = 0, runtimeMinor = 0] = runtimeVersion.split('.').map(Number);
+const atLeast02 = runtimeMajor > 0 || runtimeMinor >= 2;
+const personaConfig = atLeast02 ? {personaPrefix: 'HOST PERSONA'} : {persona: 'HOST PERSONA'};
 const recipe = await loadRecipe(root);
 const outputs = await render({root, ...recipe});
 const text = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('');
 const message = (kind, body = kind, fields = {}) => createUserMessage({source: {kind, ...fields}, content: [{type: 'text', text: body}]});
+
+// Exercise the installed release's own V4 admission when it ships one. The retired shape
+// must be rejected there, not only by this fixture's literal assertion.
+function assertNativeAdmission(message) {
+  if (assertV4RowAdmission === undefined) return;
+  const row = candidate => ({type: 'user/message', seq: 1, time: 1, data: candidate});
+  assert.doesNotThrow(() => assertV4RowAdmission(row(message)));
+  assert.throws(
+    () => assertV4RowAdmission(row({...message, source: {kind: 'plugin', plugin: 'gpt-with-taste', form: 'instructions'}})),
+    /producer-owned source kind/,
+  );
+}
+
+// Link the installed SDK's dependency closure into the temporary profile so the bundle's
+// peer import resolves the same way pnpm-installed profiles do. Earlier DSH releases
+// exposed this as healProfilesModuleFallback; later ones leave peers to the package manager.
+async function linkProfileModules(installAnchor, home) {
+  const modules = path.join(home, 'profiles', 'node_modules');
+  await fs.mkdir(modules, {recursive: true});
+  const seen = new Set();
+  const queue = [installAnchor];
+  for (let manifestPath = queue.shift(); manifestPath !== undefined; manifestPath = queue.shift()) {
+    const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
+    for (const name of [...Object.keys(manifest.dependencies ?? {}), ...Object.keys(manifest.peerDependencies ?? {})]) {
+      if (seen.has(name)) continue;
+      let resolved;
+      try { resolved = createRequire(manifestPath).resolve(`${name}/package.json`); }
+      // Packages without a package.json export are irrelevant to the bundle's peer import.
+      catch { continue; }
+      seen.add(name);
+      const link = path.join(modules, name);
+      await fs.mkdir(path.dirname(link), {recursive: true});
+      try { await fs.symlink(path.dirname(resolved), link, process.platform === 'win32' ? 'junction' : 'dir'); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      queue.push(resolved);
+    }
+  }
+}
 
 async function fixture(t, rootRole = 'main') {
   const tempRoot = path.join(root, '.tmp');
   await fs.mkdir(tempRoot, {recursive: true});
   const home = await fs.mkdtemp(path.join(tempRoot, 'dsh-native-'));
   t.after(() => fs.rm(home, {recursive: true, force: true}));
-  healProfilesModuleFallback(path.join(packageRoot, 'package.json'), home);
+  await linkProfileModules(path.join(packageRoot, 'package.json'), home);
   const profile = path.join(home, 'profiles', 'fixture');
   const bundleDir = path.join(profile, 'node_modules', 'dsh-gpt-with-taste');
   await fs.mkdir(bundleDir, {recursive: true});
@@ -42,11 +86,31 @@ async function fixture(t, rootRole = 'main') {
   const ctx = new Context();
   t.after(() => ctx.fiber.dispose());
   await ctx.plugin(Loader, {baseUrl: pathToFileURL(profile + path.sep).href});
-  for (const name of ['dsh-llm', 'dsh-session', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop']) {
+  const hasProjectionService = (() => {
+    try { requireDsh.resolve('@deepseek-ai/dsh-session-projection'); return true; }
+    catch { return false; } // DSH 0.1 provides no projection service; its agent does not inject one.
+  })();
+  const services = [
+    'dsh-llm',
+    'dsh-session',
+    ...(hasProjectionService ? ['dsh-session-projection'] : []),
+    'dsh-system-prompt',
+    'dsh-tools',
+    'dsh-agent',
+    'dsh-agent-loop',
+  ];
+  for (const name of services) {
     await ctx.loader.create({
       name: pathToFileURL(requireDsh.resolve(`@deepseek-ai/${name}`)).href,
-      config: name === 'dsh-agent-loop' ? {agents: []} : name === 'dsh-system-prompt' ? {persona: 'HOST PERSONA'} : {},
+      config: name === 'dsh-agent-loop' ? {agents: []} : name === 'dsh-system-prompt' ? personaConfig : {},
     });
+  }
+  // DSH 0.2 requires a tool executor to render any prompt or run the agent; this fixture
+  // never dispatches a call, so an empty executor is enough. Earlier releases default it.
+  const requiresExecutor = typeof ctx.tools?.selectExecutor === 'function' && typeof ctx.tools.setExecutor === 'function';
+  if (requiresExecutor) {
+    try { ctx.tools.selectExecutor(); }
+    catch { ctx.tools.setExecutor({describe: () => ({schemas: []}), execute: async () => ({results: [], additionalContexts: [], concluded: false})}); }
   }
   await ctx.loader.root.update([...ctx.loader.root.data, ...rows]);
   await ctx.loader.await();
@@ -60,7 +124,7 @@ async function fixture(t, rootRole = 'main') {
   const step = (agent, messages) => agentEvents(ctx, agent).waterfall('agent/pre-step', {
     messages, turn: 1, step: 1, signal: new AbortController().signal,
   }, async () => ({kind: 'enter', messages}));
-  return {ctx, makeAgent, step, bundleDir};
+  return {ctx, makeAgent, step, bundleDir, atLeast02};
 }
 
 test('native bundle discovery, Loader apply, prompt augmentation and clean unload', async t => {
@@ -99,7 +163,8 @@ test('typed input sources get one preceding instruction; originals, rejections a
     assert.equal(result.messages.length, 2);
     assert.equal(text(result.messages[0]), recipe.texts[key]);
     assert.equal(result.messages[1], original);
-    assert.deepEqual(result.messages[0].source, {kind: 'plugin', plugin: 'gpt-with-taste', form: 'instructions'});
+    assert.deepEqual(result.messages[0].source, {kind: 'plugin:gpt-with-taste', form: 'instructions'});
+    assertNativeAdmission(result.messages[0]);
   }
   const opaque = [message('plugin', 'ordinary context', {plugin: 'host'}), message('extension-defined', 'unclassified'), message('tool', 'normal tool continuation', {callId: 'tool-call'})];
   assert.deepEqual((await step(main, opaque)).messages, opaque);
@@ -110,6 +175,9 @@ test('typed input sources get one preceding instruction; originals, rejections a
   assert.equal(result.messages[1], mixed[0]);
   assert.equal(result.messages[3], mixed[1]);
   assert.deepEqual((await step(main, result.messages.filter(m => m.source.kind === 'plugin'))).messages, result.messages.filter(m => m.source.kind === 'plugin'));
+  const injected = result.messages.filter(m => m.source.kind === 'plugin:gpt-with-taste');
+  assert.equal(injected.length, 2);
+  assert.deepEqual((await step(main, injected)).messages, injected);
   const reject = ctx.on('agent/pre-step', async (_payload, next) => { await next(); return {kind: 'reject'}; });
   assert.deepEqual(await step(main, [cases[0][1]]), {kind: 'reject'});
   reject();
@@ -126,16 +194,29 @@ test('explicit independent root retains native subagent identity and disables ro
 });
 
 test('real send/steer/inject/followup claim path logs instructions without extra wakes or model calls', async t => {
-  const {ctx, makeAgent} = await fixture(t);
+  const {ctx, makeAgent, atLeast02} = await fixture(t);
   const agent = await makeAgent('live');
   const other = await makeAgent('other');
   const claims = [];
   const transitions = [];
   ctx.on('agent/inbox/claimed', ({agent: owner, message}) => claims.push([owner.id, message.id]));
   ctx.on('agent/status', ({agent: owner, status}) => transitions.push([owner.id, status]));
-  // The real loop commits pre-step user/message events, then stops before resolving any model/provider.
-  const stopped = new Error('fixture: stop before model request');
-  ctx.on('agent/request', async (_payload, next) => { await next(); throw stopped; });
+  // DSH 0.2 commits pre-step messages after resolving the request config, so stop at the
+  // adapter stream instead; earlier releases commit first and stop at agent/request.
+  const stopped = new Error('fixture: stop before model stream');
+  if (atLeast02) {
+    ctx.llm.registerAdapter(['unchanged-provider'], {
+      providerInfo: id => ({id, name: 'fixture'}),
+      providerRetryPolicy: () => undefined,
+      prepareCall: async (provider, model) => ({
+        model: {provider, id: model, name: model},
+        stream: () => { throw stopped; },
+      }),
+      stream: () => { throw stopped; },
+    });
+  } else {
+    ctx.on('agent/request', async (_payload, next) => { await next(); throw stopped; });
+  }
   const errors = [];
   ctx.on('agent/error', payload => errors.push(payload.error));
   const quiet = message('subagent-report', 'quiet child report', {form: 'relay', senderSessionId: 'child'});
@@ -146,11 +227,11 @@ test('real send/steer/inject/followup claim path logs instructions without extra
   const user = message('user', 'original user');
   agent.followup(user);
   await agent.whenIdle();
-  const logged = agent.session.events.filter(event => event.type === 'user/message').map(event => event.data);
+  const logged = agent.session.log.filter(event => event.type === 'user/message').map(event => event.data);
   assert.equal(claims.filter(([id]) => id === agent.id).length, 2);
   assert.deepEqual(logged.map(text).filter(value => value !== 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nHOST AGENTS'), [recipe.texts.agentSteer, 'quiet child report', recipe.texts.userSteer, 'original user']);
   assert.equal(logged.find(value => value.id === user.id).content[0].text, 'original user');
-  assert.deepEqual(other.session.events.filter(event => event.type === 'user/message'), []);
+  assert.deepEqual(other.session.log.filter(event => event.type === 'user/message'), []);
   assert.equal(errors.length, 1);
   assert.deepEqual(transitions, [[agent.id, 'running'], [agent.id, 'idle']]);
 
@@ -173,7 +254,7 @@ test('real send/steer/inject/followup claim path logs instructions without extra
   assert.equal(agent.status, 'idle');
   assert.equal(transitions.filter(([, status]) => status === 'running').length, 2);
   assert.equal(errors.length, 2);
-  assert.ok(errors.every(error => error === stopped));
+  assert.ok(errors.every(error => error === stopped || error.message === stopped.message));
 });
 
 test('agent-scoped installation stays local and unwinds with its fiber', async t => {

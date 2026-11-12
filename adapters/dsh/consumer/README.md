@@ -1,5 +1,7 @@
 # Published DSH consumer SDK
 
+`adapters/dsh/consumer-0.2/` pins the same fixture to DSH **0.2.2-rc.1** and its peer closure. Install that manifest and lockfile into `.tmp/dsh-sdk-0-2` with the same `npm ci` command, then run `npm run test:dsh` with `DSH_PACKAGE_ROOT` pointing there. One test file covers both targets: it selects the available services, system-prompt persona keys and request-stop path from the installed SDK.
+
 This manifest and lockfile install the published SDK used by `dsh.test.mjs`, without the DSH CLI, web UI, or concrete tool/provider implementations. Every DSH package is pinned to `0.1.0-rc.6`; the other direct dependencies pin the required Cordis peer set. Installing only `@deepseek-ai/dsh@0.1.0-rc.6` does not pin that SDK: the CLI's caret dependencies can resolve to later prereleases.
 
 From the repository root, reproduce the CI installation in an isolated directory:
