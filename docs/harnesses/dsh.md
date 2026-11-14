@@ -4,7 +4,7 @@ Use GPT with Taste as a native [DeepSeek Harness](https://github.com/deepseek-ai
 
 ## Install and enable
 
-Use DSH **0.1.0-rc.6** or later with its normal profile plugin support. The runtime has been verified against rc.6; rerun the consumer fixture below when adopting another prerelease. Keep your existing profile, provider, model, permission settings and agent presets.
+The bundle accepts `@deepseek-ai/dsh-llm >=0.1.0-rc.6 <0.2.0` and the specifically tested `0.2.2-rc.1`. The updated consumer fixture verifies the latter; rerun it against another prerelease before widening the peer range. Keep your existing profile, provider, model, permission settings and agent presets.
 
 From this repository's root, build the generated package and add it to the profile you use. This example uses `web`:
 
@@ -47,7 +47,7 @@ At `agent/pre-step`, the plugin delegates with `next()` and augments only an acc
 | `subagent-report` or `subagent-settled` to a native subagent | Sub Steer |
 | Tool results, plugin context, unknown source kinds | None |
 
-Each recognized message gets one preceding plugin-owned instruction message. The original message keeps its identity, content and source. DSH logs both through its normal `user/message` path before a request. A rejected step stays rejected. An ordinary tool continuation with no new recognized input gets no new steering.
+Each recognized message gets one preceding instruction message with the producer-owned source kind `gpt-with-taste`. The original message keeps its identity, content and source. DSH logs both through its normal `user/message` path before a request. A rejected step stays rejected. An ordinary tool continuation with no new recognized input gets no new steering.
 
 The plugin neither sends nor injects inbox items, so it cannot wake an idle agent or start an extra turn. Quiet reports remain quiet until the host claims them; running-agent delivery retains the host's next-step/next-turn behavior. It does not infer completion from a report's prose or attribute an unknown/plugin source to an agent. Synchronous subagent results delivered as ordinary tool results remain tool results.
 
@@ -94,8 +94,8 @@ Or in a POSIX shell:
 DSH_PACKAGE_ROOT="$(npm root -g)/@deepseek-ai/dsh" node --test adapters/dsh/dsh.test.mjs
 ```
 
-For another installation layout, set `DSH_PACKAGE_ROOT` to the directory containing that installation's `@deepseek-ai/dsh/package.json`. The fixture creates a temporary profile under this repository's `.tmp/`, discovers the bundle with DSH's `loadProfile`, and applies it through the real Cordis Loader. It exercises prompt assembly, scoped installation, source routing, disposal and the real inbox/claim/pre-step/session-log path. It stops the loop at `agent/request` before provider resolution, with no model call or live-home access. It uses DSH's own profile module-link setup to resolve the peer from the selected installation.
+For another installation layout, set `DSH_PACKAGE_ROOT` to the directory containing that installation's `@deepseek-ai/dsh/package.json`. The fixture creates a temporary profile under this repository's `.tmp/`, discovers the bundle with DSH's `loadProfile`, and applies it through the real Cordis Loader. It exercises prompt assembly, scoped installation, source routing, disposal, inbox/claim behavior and a complete request through a deterministic in-process `LlmAdapter`. It verifies that the producer-owned instruction source is persisted and does not contact a provider or live DSH home.
 
-The target APIs are the rc.6 `AssembleContext.agent`, `Session.header.origin`, `agent/pre-step` decision and identified `UserMessage` types. Source inspection through `dsh-v0.1.1-rc.2` found the same seams; that later loop changes interrupted-stream handling, which this adapter does not intercept. Runtime verification for another prerelease is the same fixture pointed at that installation, not an assumption based on the source checkout.
+The regression fix was verified with DSH `0.2.2-rc.1`, including its producer-owned message-source validation and session event path. The earlier adapter was verified against `0.1.0-rc.6` and source-inspected through `0.1.1-rc.2`; rerun this fixture against any other prerelease before widening the declared peer range.
 
 Native references: [bundle discovery and profile layers](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.2/packages/boot/app-boot/src/profile.ts), [system-prompt sections and assembly](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.2/packages/core/system-prompt/src/index.ts), [agent events and input types](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.2/packages/core/agent/src/runtime-types.ts), [native subagent message sources](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.2/packages/subagent/subagent/src/continuation.ts). DeepSeek Harness is MIT-licensed.

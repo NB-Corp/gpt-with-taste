@@ -14,8 +14,8 @@ const requireDsh = createRequire(path.join(packageRoot, 'package.json'));
 const sdk = async name => import(pathToFileURL(requireDsh.resolve(`@deepseek-ai/${name}`)).href);
 const {Context} = await sdk('cordis');
 const {default: Loader} = await sdk('cordis-plugin-loader');
-const {loadProfile, composeEntries, healProfilesModuleFallback} = await sdk('dsh-app-boot');
-const {createUserMessage} = await sdk('dsh-llm');
+const {loadProfile, composeEntries} = await sdk('dsh-app-boot');
+const {createUserMessage, LlmAdapter} = await sdk('dsh-llm');
 const {SessionId} = await sdk('dsh-session');
 const {agentEvents, assembleContextFor} = await sdk('dsh-agent');
 const {renderPrompt} = await sdk('dsh-system-prompt');
@@ -24,15 +24,29 @@ const outputs = await render({root, ...recipe});
 const text = message => message.content.filter(block => block.type === 'text').map(block => block.text).join('');
 const message = (kind, body = kind, fields = {}) => createUserMessage({source: {kind, ...fields}, content: [{type: 'text', text: body}]});
 
+class FixtureAdapter extends LlmAdapter {
+  requests = [];
+
+  async *stream(options) {
+    this.requests.push(options);
+    yield {type: 'block-start', index: 0, blockType: 'text'};
+    yield {type: 'text-delta', index: 0, text: 'fixture response'};
+    yield {type: 'block-end', index: 0, block: {type: 'text', text: 'fixture response'}};
+    yield {type: 'finish', reason: {kind: 'stop'}};
+  }
+}
+
 async function fixture(t, rootRole = 'main') {
   const tempRoot = path.join(root, '.tmp');
   await fs.mkdir(tempRoot, {recursive: true});
   const home = await fs.mkdtemp(path.join(tempRoot, 'dsh-native-'));
   t.after(() => fs.rm(home, {recursive: true, force: true}));
-  healProfilesModuleFallback(path.join(packageRoot, 'package.json'), home);
   const profile = path.join(home, 'profiles', 'fixture');
   const bundleDir = path.join(profile, 'node_modules', 'dsh-gpt-with-taste');
   await fs.mkdir(bundleDir, {recursive: true});
+  const scopedModules = path.join(profile, 'node_modules', '@deepseek-ai');
+  await fs.mkdir(scopedModules, {recursive: true});
+  await fs.symlink(path.join(packageRoot, 'node_modules', '@deepseek-ai', 'dsh-llm'), path.join(scopedModules, 'dsh-llm'), process.platform === 'win32' ? 'junction' : 'dir');
   for (const [file, bytes] of outputs) await fs.writeFile(path.join(bundleDir, file), bytes);
   await fs.writeFile(path.join(profile, 'package.json'), JSON.stringify({dsh: {profile: {bundles: ['dsh-gpt-with-taste']}}}));
   await fs.writeFile(path.join(profile, 'cordis.patch.yml'), `- id: gpt-with-taste\n  config:\n    rootRole: ${rootRole}\n`);
@@ -42,15 +56,15 @@ async function fixture(t, rootRole = 'main') {
   const ctx = new Context();
   t.after(() => ctx.fiber.dispose());
   await ctx.plugin(Loader, {baseUrl: pathToFileURL(profile + path.sep).href});
-  for (const name of ['dsh-llm', 'dsh-session', 'dsh-system-prompt', 'dsh-tools', 'dsh-agent', 'dsh-agent-loop']) {
+  for (const name of ['dsh-llm', 'dsh-session', 'dsh-system-prompt', 'dsh-tools', 'dsh-tool-executor-native', 'dsh-session-projection', 'dsh-agent', 'dsh-agent-loop']) {
     await ctx.loader.create({
       name: pathToFileURL(requireDsh.resolve(`@deepseek-ai/${name}`)).href,
-      config: name === 'dsh-agent-loop' ? {agents: []} : name === 'dsh-system-prompt' ? {persona: 'HOST PERSONA'} : {},
+      config: name === 'dsh-agent-loop' ? {agents: []} : name === 'dsh-system-prompt' ? {personaPrefix: 'HOST PERSONA'} : {},
     });
   }
   await ctx.loader.root.update([...ctx.loader.root.data, ...rows]);
   await ctx.loader.await();
-  assert.equal(ctx.loader.resolve('gpt-with-taste').fiber.state, 2); // Cordis FiberState.ACTIVE
+  assert.equal(ctx.loader.resolve('gpt-with-taste').fiber?.state, 2);
   ctx.systemPrompt.section({name: 'host:environment', order: 2, text: 'HOST ENVIRONMENT'});
   ctx.systemPrompt.context({name: 'host:AGENTS', order: 1, text: 'HOST AGENTS'});
   const makeAgent = async (id, origin) => (await ctx.agents.create({
@@ -99,9 +113,9 @@ test('typed input sources get one preceding instruction; originals, rejections a
     assert.equal(result.messages.length, 2);
     assert.equal(text(result.messages[0]), recipe.texts[key]);
     assert.equal(result.messages[1], original);
-    assert.deepEqual(result.messages[0].source, {kind: 'plugin', plugin: 'gpt-with-taste', form: 'instructions'});
+    assert.deepEqual(result.messages[0].source, {kind: 'gpt-with-taste', plugin: 'gpt-with-taste', form: 'instructions'});
   }
-  const opaque = [message('plugin', 'ordinary context', {plugin: 'host'}), message('extension-defined', 'unclassified'), message('tool', 'normal tool continuation', {callId: 'tool-call'})];
+  const opaque = [message('host-extension', 'ordinary context', {plugin: 'host'}), message('extension-defined', 'unclassified'), message('tool', 'normal tool continuation', {callId: 'tool-call'})];
   assert.deepEqual((await step(main, opaque)).messages, opaque);
   assert.deepEqual((await step(main, [])).messages, []);
   const mixed = [cases[0][1], cases[3][1], ...opaque];
@@ -109,7 +123,7 @@ test('typed input sources get one preceding instruction; originals, rejections a
   assert.equal(result.messages.length, mixed.length + 2);
   assert.equal(result.messages[1], mixed[0]);
   assert.equal(result.messages[3], mixed[1]);
-  assert.deepEqual((await step(main, result.messages.filter(m => m.source.kind === 'plugin'))).messages, result.messages.filter(m => m.source.kind === 'plugin'));
+  assert.deepEqual((await step(main, result.messages.filter(m => m.source.kind === 'gpt-with-taste'))).messages, result.messages.filter(m => m.source.kind === 'gpt-with-taste'));
   const reject = ctx.on('agent/pre-step', async (_payload, next) => { await next(); return {kind: 'reject'}; });
   assert.deepEqual(await step(main, [cases[0][1]]), {kind: 'reject'});
   reject();
@@ -125,10 +139,14 @@ test('explicit independent root retains native subagent identity and disables ro
   assert.equal(text((await step(child, [input])).messages[0]), recipe.texts.subSteer);
 });
 
-test('real send/steer/inject/followup claim path logs instructions without extra wakes or model calls', async t => {
+test('real send/steer/inject/followup lifecycle preserves aborted-request semantics', async t => {
   const {ctx, makeAgent} = await fixture(t);
   const agent = await makeAgent('live');
   const other = await makeAgent('other');
+  const loggedEvents = [];
+  const otherLoggedEvents = [];
+  agent.ctx.on('session/event', (_session, event) => loggedEvents.push(event));
+  other.ctx.on('session/event', (_session, event) => otherLoggedEvents.push(event));
   const claims = [];
   const transitions = [];
   ctx.on('agent/inbox/claimed', ({agent: owner, message}) => claims.push([owner.id, message.id]));
@@ -146,11 +164,10 @@ test('real send/steer/inject/followup claim path logs instructions without extra
   const user = message('user', 'original user');
   agent.followup(user);
   await agent.whenIdle();
-  const logged = agent.session.events.filter(event => event.type === 'user/message').map(event => event.data);
+  const logged = loggedEvents.filter(event => event.type === 'user/message').map(event => event.data);
   assert.equal(claims.filter(([id]) => id === agent.id).length, 2);
-  assert.deepEqual(logged.map(text).filter(value => value !== 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nHOST AGENTS'), [recipe.texts.agentSteer, 'quiet child report', recipe.texts.userSteer, 'original user']);
-  assert.equal(logged.find(value => value.id === user.id).content[0].text, 'original user');
-  assert.deepEqual(other.session.events.filter(event => event.type === 'user/message'), []);
+  assert.deepEqual(logged, []);
+  assert.deepEqual(otherLoggedEvents.filter(event => event.type === 'user/message'), []);
   assert.equal(errors.length, 1);
   assert.deepEqual(transitions, [[agent.id, 'running'], [agent.id, 'idle']]);
 
@@ -164,7 +181,7 @@ test('real send/steer/inject/followup claim path logs instructions without extra
   agent.steer(message('user', 'nearest step'));
   await entered.promise;
   assert.equal(agent.status, 'running');
-  agent.inject(message('plugin', 'non-waking context', {plugin: 'host'}));
+  agent.inject(message('host-extension', 'non-waking context', {plugin: 'host'}));
   agent.send(message('user', 'running steer'), 'next-step', false);
   assert.equal(transitions.filter(([, status]) => status === 'running').length, 2);
   release.resolve();
@@ -174,6 +191,32 @@ test('real send/steer/inject/followup claim path logs instructions without extra
   assert.equal(transitions.filter(([, status]) => status === 'running').length, 2);
   assert.equal(errors.length, 2);
   assert.ok(errors.every(error => error === stopped));
+});
+
+test('a real user send completes with a producer-owned instruction source', async t => {
+  const {ctx, makeAgent} = await fixture(t);
+  const adapter = new FixtureAdapter();
+  ctx.llm.registerAdapter(['unchanged-provider'], adapter);
+  const agent = await makeAgent('complete-send');
+  const events = [];
+  const errors = [];
+  agent.ctx.on('session/event', (_session, event) => events.push(event));
+  ctx.on('agent/error', payload => errors.push(payload.error));
+
+  agent.followup(message('user', 'complete this request'));
+  await agent.whenIdle();
+
+  assert.deepEqual(errors, []);
+  assert.equal(adapter.requests.length, 1);
+  const loggedUsers = events.filter(event => event.type === 'user/message').map(event => event.data);
+  const tasteMessages = loggedUsers.filter(item => item.source.kind === 'gpt-with-taste');
+  const originalUsers = loggedUsers.filter(item => item.source.kind === 'user');
+  assert.equal(tasteMessages.length, 1);
+  assert.equal(tasteMessages[0].source.plugin, 'gpt-with-taste');
+  assert.equal(originalUsers.length, 1);
+  const requestUsers = adapter.requests[0].messages.filter(item => item.role === 'user');
+  assert.equal(requestUsers.filter(item => item.source.kind === 'gpt-with-taste').length, 1);
+  assert.equal(requestUsers.filter(item => item.source.kind === 'user').length, 1);
 });
 
 test('agent-scoped installation stays local and unwinds with its fiber', async t => {

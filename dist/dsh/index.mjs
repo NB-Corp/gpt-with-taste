@@ -44,7 +44,7 @@ export async function apply(ctx, config = {}) {
         }
         if (key === undefined) return [message];
         return [createUserMessage({
-          source: {kind: 'plugin', plugin: name, form: 'instructions'},
+          source: {kind: name, plugin: name, form: 'instructions'},
           content: [{type: 'text', text: texts[key]}],
         }), message];
       }),
